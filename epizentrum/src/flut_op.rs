@@ -143,8 +143,12 @@ impl RingOperation for FlutOp {
         for (i, c) in connections.into_iter().enumerate() {
             let buffer = self.command_buffer_sources[i % self.command_buffer_sources.len()]
                 .command_buffer(self.time_anchor.elapsed());
-            let socket_write =
-                opcode::Write::new(Fd(c.as_raw_fd()), buffer.as_ptr(), buffer.len() as u32).build();
+            let socket_write = opcode::Write::new(
+                Fd(c.as_raw_fd()),
+                buffer.frame.as_ptr(),
+                buffer.frame.len() as u32,
+            )
+            .build();
             submitter.push(
                 socket_write,
                 FlutOpData::ConnectionEstablished {
@@ -152,7 +156,7 @@ impl RingOperation for FlutOp {
                     addr: c.peer_addr().unwrap().into(),
                     socket: c.into(),
                     source_index: (i + 1) % self.command_buffer_sources.len(),
-                    last_buffer: Some((buffer.into(), 0)),
+                    last_buffer: Some((buffer.frame.into(), 0)),
                 },
             )?;
             self.connections += 1;
@@ -260,8 +264,8 @@ impl RingOperation for FlutOp {
                         .command_buffer(self.time_anchor.elapsed());
                     let socket_write = opcode::Write::new(
                         Fd(socket.as_raw_fd()),
-                        buffer.as_ptr(),
-                        buffer.len() as u32,
+                        buffer.frame.as_ptr(),
+                        buffer.frame.len() as u32,
                     )
                     .build();
                     match submitter.push(
@@ -271,7 +275,7 @@ impl RingOperation for FlutOp {
                             socket,
                             addr,
                             source_index: (source_index + 1) % self.command_buffer_sources.len(),
-                            last_buffer: Some((buffer.into(), 0)),
+                            last_buffer: Some((buffer.frame.into(), 0)),
                         },
                     ) {
                         Ok(()) => (ControlFlow::Continue, None),
@@ -371,8 +375,8 @@ impl RingOperation for FlutOp {
                         .command_buffer(self.time_anchor.elapsed());
                     let socket_write = opcode::Write::new(
                         Fd(socket.as_raw_fd()),
-                        buffer.as_ptr(),
-                        buffer.len() as u32,
+                        buffer.frame.as_ptr(),
+                        buffer.frame.len() as u32,
                     )
                     .build();
                     match submitter.push(
@@ -382,7 +386,7 @@ impl RingOperation for FlutOp {
                             addr,
                             socket,
                             source_index: (source_index + 1) % self.command_buffer_sources.len(),
-                            last_buffer: Some((buffer.into(), 0)),
+                            last_buffer: Some((buffer.frame.into(), 0)),
                         },
                     ) {
                         Ok(()) => (ControlFlow::Continue, None),

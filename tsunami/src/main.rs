@@ -8,12 +8,19 @@ use std::time::{Duration, Instant};
 
 use tracing::Level;
 
+use epizentrum::draw_strategy::DrawStrategy;
 use epizentrum::flut_op::FlutOp;
-use epizentrum::{CommandBufferSource, ControlFlowError, SetupError, TeardownError};
+use epizentrum::frame_processing::rayon_processor::RayonProcessor;
+use epizentrum::frame_source::media_source::MediaSource;
+use epizentrum::frame_source::{FrameSource, Timing};
+use epizentrum::{
+    CommandBufferSource, CompositeBufferSource, ControlFlowError, OnDemandCache, SetupError,
+    TeardownError,
+};
 
 const MAX_SIZE_RESPONSE_LENGTH: usize = 32;
 
-fn get_size(stream: &mut TcpStream) -> eyre::Result<(u32, u32)> {
+fn get_size(stream: &mut TcpStream) -> eyre::Result<(u16, u16)> {
     let buf = "SIZE\n".as_bytes().to_vec();
     stream.write_all(buf.as_slice())?;
 
@@ -53,8 +60,8 @@ fn get_size(stream: &mut TcpStream) -> eyre::Result<(u32, u32)> {
         None => Err(eyre::eyre!("invalid response")),
         Some(idx) if splits.len() < idx + 3 => Err(eyre::eyre!("invalid response")),
         Some(idx) => {
-            let x = u32::from_str(splits.get(idx + 1).unwrap())?;
-            let y = u32::from_str(splits.get(idx + 2).unwrap())?;
+            let x = u16::from_str(splits.get(idx + 1).unwrap())?;
+            let y = u16::from_str(splits.get(idx + 2).unwrap())?;
             Ok((x, y))
         }
     }
@@ -90,8 +97,16 @@ impl Debug for TestSource {
 }
 
 impl CommandBufferSource for TestSource {
-    fn command_buffer(&self, _delta: Duration) -> Rc<[u8]> {
-        self.0.clone()
+    fn command_buffer(&self, delta: Duration) -> Timing<Rc<[u8]>> {
+        Timing {
+            frame: self.0.clone(),
+            frame_time: Duration::MAX,
+            time_left: Duration::MAX - delta,
+        }
+    }
+
+    fn cycle_time(&self) -> Duration {
+        Duration::MAX
     }
 }
 
@@ -104,12 +119,18 @@ fn main() -> eyre::Result<()> {
 
     let mut socket =
         TcpStream::connect("127.0.0.1:1337".to_socket_addrs().unwrap().next().unwrap()).unwrap();
-    let size = get_size(&mut socket)?;
+    let canvas_size = get_size(&mut socket)?;
+
+    let source = MediaSource::new("assets/media/badapple.gif")?;
+    let processor =
+        RayonProcessor::new(source.size(), (100, 100), canvas_size, DrawStrategy::Random);
+    let cmd_src = OnDemandCache::new(CompositeBufferSource { source, processor });
+    let boxed_cmd_src: Box<dyn CommandBufferSource> = Box::new(cmd_src);
 
     let ring = epizentrum::tsunami_ring::Ring::new_raw_ring(NonZeroU32::new(128).unwrap())?;
     let flut_op = FlutOp::new(
         [SocketAddr::new(IpAddr::from([127, 0, 0, 1]), 1337)].as_slice(),
-        [TestSource::new_boxed(size)].into(),
+        [boxed_cmd_src].into(),
         Some(NonZeroUsize::new(1).unwrap()),
         Some(Duration::from_secs(10)),
         None,
