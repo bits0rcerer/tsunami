@@ -1,9 +1,11 @@
+use std::error::Error;
 use std::fmt::Debug;
 use std::ptr::slice_from_raw_parts;
+use std::sync::Arc;
 
 use krnl::buffer::{Buffer, Slice};
 use krnl::device::error::DeviceLost;
-use krnl::device::Device;
+use krnl::device::{Device, DeviceInfo};
 use krnl::macros::module;
 use thiserror::Error;
 use tracing::error;
@@ -115,23 +117,21 @@ pub struct GpuProcessor {
 
 impl GpuProcessor {
     pub fn list_devices() {
-        for i in 0.. {
-            match Device::builder()
-                .index(i)
-                .build()
-                .map(|d| (d.info().cloned(), d))
-            {
-                Ok((Some(info), _)) => {
-                    println!("Device {i}: {info:#?}");
-                }
-                Ok((None, _)) => {
-                    error!("unable to get information about device {i} ",);
-                }
-                Err(_) => {
-                    return;
-                }
+        for (i, info) in Self::devices().iter() {
+            match info {
+                Some(info) => println!("Device {i}: {info:#?}"),
+                None => error!("unable to get information about device {i}"),
             }
         }
+    }
+    pub fn devices() -> Box<[(usize, Option<Arc<DeviceInfo>>)]> {
+        (0..)
+            .map_while(|i| match Device::builder().index(i).build() {
+                Ok(d) => Some((i, d.info().cloned())),
+                Err(_) => None,
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
     }
 
     pub fn new(
@@ -198,9 +198,7 @@ impl GpuProcessor {
 }
 
 impl FrameProcessor for GpuProcessor {
-    type Error = GpuProcessorError;
-
-    fn process(&self, frame: &Frame) -> Result<Box<[u8]>, Self::Error> {
+    fn process(&self, frame: &Frame) -> Result<Box<[u8]>, Box<dyn Error + Send + Sync>> {
         let buffer = match frame {
             Frame::Rgba(buffer) => buffer.as_ref(),
             Frame::Bgra(buffer) => buffer.as_ref(),
@@ -248,6 +246,7 @@ impl FrameProcessor for GpuProcessor {
             .into_vec()
             .map(|v| v.into_boxed_slice())
             .map_err(GpuProcessorError::Download)
+            .map_err(Box::from)
     }
 }
 

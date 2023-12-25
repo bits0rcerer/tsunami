@@ -31,12 +31,12 @@ pub trait CommandBufferSource: Debug {
 }
 
 #[derive(Debug)]
-pub struct CompositeBufferSource<Src: FrameSource + Debug, Proc: FrameProcessor + Debug> {
+pub struct CompositeBufferSource<Src: FrameSource, Proc: FrameProcessor> {
     pub source: Src,
     pub processor: Proc,
 }
 
-impl<Src: FrameSource + Debug, Proc: FrameProcessor + Debug> CommandBufferSource
+impl<Src: FrameSource, Proc: FrameProcessor> CommandBufferSource
     for CompositeBufferSource<Src, Proc>
 {
     fn command_buffer(
@@ -49,14 +49,11 @@ impl<Src: FrameSource + Debug, Proc: FrameProcessor + Debug> CommandBufferSource
             time_left,
         } = self.source.frame(delta);
 
-        self.processor
-            .process(frame)
-            .map(|frame| Timing {
-                frame: frame.into(),
-                frame_time,
-                time_left,
-            })
-            .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)
+        self.processor.process(frame).map(|frame| Timing {
+            frame: frame.into(),
+            frame_time,
+            time_left,
+        })
     }
 
     fn cycle_time(&self) -> Duration {

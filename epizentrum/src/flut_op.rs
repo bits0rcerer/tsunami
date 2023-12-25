@@ -1,6 +1,7 @@
 use std::cmp::min;
 use std::fmt::{Debug, Formatter};
-use std::net::{IpAddr, SocketAddr, TcpStream};
+use std::iter::zip;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, TcpStream};
 use std::num::NonZeroUsize;
 use std::os::fd::AsRawFd;
 use std::rc::Rc;
@@ -11,7 +12,7 @@ use rummelplatz::io_uring::opcode;
 use rummelplatz::io_uring::squeue::{Entry, Flags};
 use rummelplatz::io_uring::types::{Fd, Timespec};
 use rummelplatz::{io_uring, ControlFlow, RingOperation, SubmissionQueueSubmitter};
-use socket2::{Domain, Protocol, Socket, Type};
+use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use tracing::{debug, error, info, warn};
 
 use crate::breadth_flatten::BreadthFlatten;
@@ -47,6 +48,7 @@ impl<T> DebugShield<T> {
 pub struct FlutOp {
     reuse_connections: Vec<TcpStream>,
 
+    local_interfaces: Option<Box<[IpAddr]>>,
     targets: Box<[SocketAddr]>,
     connection_limit: Option<NonZeroUsize>,
     reconnect_backoff_limit: Option<Duration>,
@@ -68,6 +70,7 @@ impl Drop for FlutOp {
 impl FlutOp {
     pub fn new(
         targets: &[SocketAddr],
+        local_interfaces: Option<&[IpAddr]>,
         command_buffer_sources: Box<[Box<dyn CommandBufferSource>]>,
         connection_limit: Option<NonZeroUsize>,
         reconnect_backoff_limit: Option<Duration>,
@@ -77,6 +80,7 @@ impl FlutOp {
     ) -> Self {
         Self {
             reuse_connections,
+            local_interfaces: local_interfaces.map(|local_interfaces| local_interfaces.into()),
             targets: targets.into(),
             connection_limit,
             reconnect_backoff_limit,
@@ -121,18 +125,62 @@ impl RingOperation for FlutOp {
         mut submitter: SubmissionQueueSubmitter<Self::RingData, W>,
     ) -> Result<(), Self::SetupError> {
         let open_connections = self.reuse_connections.len();
-        let connection_iters = self.targets.iter().map(|target| {
-            (0..).map_while(move |i| match TcpStream::connect(target) {
-                Ok(socket) => {
-                    debug!("+ connection {} -> {target}", open_connections + i);
-                    Some(socket)
-                }
-                Err(e) => {
-                    debug!("unable to connect to {target}: {e:?}");
-                    None
-                }
-            })
-        });
+        let local_interfaces = match &self.local_interfaces {
+            Some(local_interfaces) if local_interfaces.len() > 0 => local_interfaces.clone(),
+            _ => [Ipv4Addr::UNSPECIFIED.into(), Ipv6Addr::UNSPECIFIED.into()].into(),
+        };
+
+        let connection_iters = zip(self.targets.iter(), (0..).map(|_| local_interfaces.iter()))
+            .flat_map(|(target, local_interfaces)| {
+                local_interfaces.filter_map(move |local_interface| {
+                    match (local_interface, target) {
+                        (IpAddr::V4(local), SocketAddr::V4(target)) => {
+                            Some(Box::new((0..).map_while(move |i| {
+                                match Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))
+                                    .and_then(|socket| {
+                                        socket
+                                            .bind(&SockAddr::from(SocketAddrV4::new(*local, 0)))?;
+                                        socket.connect(&SockAddr::from(*target))?;
+                                        Ok(socket)
+                                    }) {
+                                    Ok(socket) => {
+                                        debug!("+ connection {} -> {target}", open_connections + i);
+                                        Some(socket.into())
+                                    }
+                                    Err(e) => {
+                                        debug!("unable to bind socket {local} -> {target}: {e:?}");
+                                        None
+                                    }
+                                }
+                            }))
+                                as Box<dyn Iterator<Item = _>>)
+                        }
+                        (IpAddr::V6(local), SocketAddr::V6(target)) => {
+                            Some(Box::new((0..).map_while(move |i| {
+                                match Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))
+                                    .and_then(|socket| {
+                                        socket.bind(&SockAddr::from(SocketAddrV6::new(
+                                            *local, 0, 0, 0,
+                                        )))?;
+                                        socket.connect(&SockAddr::from(*target))?;
+                                        Ok(socket)
+                                    }) {
+                                    Ok(socket) => {
+                                        debug!("+ connection {} -> {target}", open_connections + i);
+                                        Some(socket.into())
+                                    }
+                                    Err(e) => {
+                                        debug!("unable to bind socket {local} -> {target}: {e:?}");
+                                        None
+                                    }
+                                }
+                            }))
+                                as Box<dyn Iterator<Item = _>>)
+                        }
+                        _ => None,
+                    }
+                })
+            });
         let connections = self
             .reuse_connections
             .drain(..)
@@ -178,7 +226,7 @@ impl RingOperation for FlutOp {
 
     fn on_completion<W: Fn(&mut Entry, Self::RingData)>(
         &mut self,
-        completion_entry: rummelplatz::io_uring::cqueue::Entry,
+        completion_entry: io_uring::cqueue::Entry,
         ring_data: Self::RingData,
         mut submitter: SubmissionQueueSubmitter<Self::RingData, W>,
     ) -> (

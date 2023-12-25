@@ -3,7 +3,7 @@ name = "tsunami"
 version = "0.1.0"
 edition = "2021"
 authors = ["bits0rcerer <25325997+bits0rcerer@users.noreply.github.com>"]
-description = "A capable Pixelflut client for modern linux"
+description = "A potent GPU accelerated Pixelflut client for modern Linux written in Rust"
 
 [dependencies]
 epizentrum = { path = "../epizentrum" }

@@ -1,4 +1,4 @@
-use std::convert::Infallible;
+use std::error::Error;
 
 use rayon::prelude::*;
 
@@ -31,9 +31,7 @@ impl RayonProcessor {
 }
 
 impl FrameProcessor for RayonProcessor {
-    type Error = Infallible;
-
-    fn process(&self, frame: &Frame) -> Result<Box<[u8]>, Self::Error> {
+    fn process(&self, frame: &Frame) -> Result<Box<[u8]>, Box<dyn Error + Send + Sync + 'static>> {
         Ok(match frame {
             Frame::Rgba(buffer) => self
                 .draw_order
