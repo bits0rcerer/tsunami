@@ -1,8 +1,10 @@
+use std::fmt::Debug;
 use std::time::Duration;
 
 pub mod media_source;
 
-pub struct Timing<F> {
+#[derive(Debug)]
+pub struct Timing<F: Debug> {
     pub frame: F,
     pub frame_time: Duration,
     pub time_left: Duration,

@@ -1,3 +1,4 @@
+use std::error::Error;
 use std::fmt::{Debug, Formatter};
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
@@ -10,12 +11,13 @@ use tracing::Level;
 
 use epizentrum::draw_strategy::DrawStrategy;
 use epizentrum::flut_op::FlutOp;
+use epizentrum::frame_processing::gpu_processor::GpuProcessor;
 use epizentrum::frame_processing::rayon_processor::RayonProcessor;
 use epizentrum::frame_source::media_source::MediaSource;
 use epizentrum::frame_source::{FrameSource, Timing};
 use epizentrum::{
-    CommandBufferSource, CompositeBufferSource, ControlFlowError, OnDemandCache, SetupError,
-    TeardownError,
+    tsunami_ring, CommandBufferSource, CompositeBufferSource, ControlFlowError, SetupError,
+    SingleFrameCache, TeardownError,
 };
 
 const MAX_SIZE_RESPONSE_LENGTH: usize = 32;
@@ -97,12 +99,15 @@ impl Debug for TestSource {
 }
 
 impl CommandBufferSource for TestSource {
-    fn command_buffer(&self, delta: Duration) -> Timing<Rc<[u8]>> {
-        Timing {
+    fn command_buffer(
+        &mut self,
+        delta: Duration,
+    ) -> Result<Timing<Rc<[u8]>>, Box<dyn Error + Send + Sync>> {
+        Ok(Timing {
             frame: self.0.clone(),
             frame_time: Duration::MAX,
             time_left: Duration::MAX - delta,
-        }
+        })
     }
 
     fn cycle_time(&self) -> Duration {
@@ -122,22 +127,31 @@ fn main() -> eyre::Result<()> {
     let canvas_size = get_size(&mut socket)?;
 
     let source = MediaSource::new("assets/media/badapple.gif")?;
-    let processor =
+    let rayon_processor =
         RayonProcessor::new(source.size(), (100, 100), canvas_size, DrawStrategy::Random);
-    let cmd_src = OnDemandCache::new(CompositeBufferSource { source, processor });
-    let boxed_cmd_src: Box<dyn CommandBufferSource> = Box::new(cmd_src);
+    let gpu_processor = GpuProcessor::new(
+        1,
+        source.size(),
+        (100, 100),
+        canvas_size,
+        DrawStrategy::Random,
+    )?;
+    let cmd_src = SingleFrameCache::new(CompositeBufferSource {
+        source,
+        processor: gpu_processor,
+    });
 
-    let ring = epizentrum::tsunami_ring::Ring::new_raw_ring(NonZeroU32::new(128).unwrap())?;
+    let ring = tsunami_ring::Ring::new_raw_ring(NonZeroU32::new(128).unwrap())?;
     let flut_op = FlutOp::new(
         [SocketAddr::new(IpAddr::from([127, 0, 0, 1]), 1337)].as_slice(),
-        [boxed_cmd_src].into(),
-        Some(NonZeroUsize::new(1).unwrap()),
+        [Box::new(cmd_src) as Box<dyn CommandBufferSource>].into(),
+        Some(NonZeroUsize::new(12).unwrap()),
         Some(Duration::from_secs(10)),
         None,
         vec![socket],
         Instant::now(),
     );
-    let mut ring = epizentrum::tsunami_ring::Ring::new(ring, None, flut_op);
+    let mut ring = tsunami_ring::Ring::new(ring, None, flut_op);
     ring.run::<SetupError, ControlFlowError, TeardownError>()?;
 
     Ok(())

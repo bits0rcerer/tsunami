@@ -11,6 +11,8 @@ thiserror.workspace = true
 
 rummelplatz = { git = "https://github.com/bits0rcerer/rummelplatz" }
 
+krnl = "0.0.3"
+
 rand = "0.8.5"
 rayon = "1.8.0"
 

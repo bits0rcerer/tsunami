@@ -2,11 +2,13 @@
 extern crate core;
 
 use std::cmp::Ordering;
+use std::error::Error;
 use std::fmt::Debug;
+use std::ops::Add;
 use std::rc::Rc;
-use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+pub use rummelplatz;
 use rummelplatz::io_uring::squeue::PushError;
 use thiserror::Error;
 
@@ -21,7 +23,10 @@ pub mod frame_processing;
 pub mod frame_source;
 
 pub trait CommandBufferSource: Debug {
-    fn command_buffer(&self, delta: Duration) -> Timing<Rc<[u8]>>;
+    fn command_buffer(
+        &mut self,
+        delta: Duration,
+    ) -> Result<Timing<Rc<[u8]>>, Box<dyn Error + Send + Sync>>;
     fn cycle_time(&self) -> Duration;
 }
 
@@ -34,18 +39,24 @@ pub struct CompositeBufferSource<Src: FrameSource + Debug, Proc: FrameProcessor 
 impl<Src: FrameSource + Debug, Proc: FrameProcessor + Debug> CommandBufferSource
     for CompositeBufferSource<Src, Proc>
 {
-    fn command_buffer(&self, delta: Duration) -> Timing<Rc<[u8]>> {
+    fn command_buffer(
+        &mut self,
+        delta: Duration,
+    ) -> Result<Timing<Rc<[u8]>>, Box<dyn Error + Send + Sync>> {
         let Timing {
             frame,
             frame_time,
             time_left,
         } = self.source.frame(delta);
 
-        Timing {
-            frame: self.processor.process(frame).into(),
-            frame_time,
-            time_left,
-        }
+        self.processor
+            .process(frame)
+            .map(|frame| Timing {
+                frame: frame.into(),
+                frame_time,
+                time_left,
+            })
+            .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)
     }
 
     fn cycle_time(&self) -> Duration {
@@ -54,12 +65,12 @@ impl<Src: FrameSource + Debug, Proc: FrameProcessor + Debug> CommandBufferSource
 }
 
 #[derive(Debug)]
-pub struct OnDemandCache<Src: CommandBufferSource> {
-    cache: Mutex<Vec<((Duration, Duration), Rc<[u8]>)>>,
+pub struct ComputeOnceCache<Src: CommandBufferSource> {
+    cache: Vec<((Duration, Duration), Rc<[u8]>)>,
     src: Src,
 }
 
-impl<Src: CommandBufferSource> OnDemandCache<Src> {
+impl<Src: CommandBufferSource> ComputeOnceCache<Src> {
     pub fn new(src: Src) -> Self {
         Self {
             src,
@@ -68,16 +79,14 @@ impl<Src: CommandBufferSource> OnDemandCache<Src> {
     }
 }
 
-impl<Src: CommandBufferSource> CommandBufferSource for OnDemandCache<Src> {
-    fn command_buffer(&self, delta: Duration) -> Timing<Rc<[u8]>> {
+impl<Src: CommandBufferSource> CommandBufferSource for ComputeOnceCache<Src> {
+    fn command_buffer(
+        &mut self,
+        delta: Duration,
+    ) -> Result<Timing<Rc<[u8]>>, Box<dyn Error + Send + Sync>> {
         let delta = Duration::from_nanos((delta.as_nanos() % self.cycle_time().as_nanos()) as u64);
 
-        let mut cache = self
-            .cache
-            .lock()
-            .expect("unable to acquire a lock on cache");
-
-        match cache.binary_search_by(|&((start, end), _)| {
+        match self.cache.binary_search_by(|&((start, end), _)| {
             if delta < start {
                 Ordering::Less
             } else if delta >= end {
@@ -87,30 +96,79 @@ impl<Src: CommandBufferSource> CommandBufferSource for OnDemandCache<Src> {
             }
         }) {
             Ok(i) => {
-                let ((start, end), frame) = &cache[i];
+                let ((start, end), frame) = &self.cache[i];
 
-                Timing {
+                Ok(Timing {
                     frame: frame.clone(),
                     frame_time: (*end - *start),
                     time_left: (*end - delta),
-                }
+                })
             }
-            Err(i) => {
+            Err(i) => self.src.command_buffer(delta).map(|command_buffer| {
                 let Timing {
                     frame,
                     frame_time,
                     time_left,
-                } = self.src.command_buffer(delta);
+                } = command_buffer;
 
                 let end = delta + time_left;
                 let start = end - frame_time;
-                cache.insert(i, ((start, end), frame.clone()));
+                self.cache.insert(i, ((start, end), frame.clone()));
 
                 Timing {
                     frame,
                     frame_time,
                     time_left,
                 }
+            }),
+        }
+    }
+
+    fn cycle_time(&self) -> Duration {
+        self.src.cycle_time()
+    }
+}
+
+#[derive(Debug)]
+pub struct SingleFrameCache<Src: CommandBufferSource> {
+    cache: Option<(Instant, Duration, Rc<[u8]>)>,
+    src: Src,
+}
+
+impl<Src: CommandBufferSource> SingleFrameCache<Src> {
+    pub fn new(src: Src) -> Self {
+        Self {
+            src,
+            cache: Default::default(),
+        }
+    }
+}
+
+impl<Src: CommandBufferSource> CommandBufferSource for SingleFrameCache<Src> {
+    fn command_buffer(
+        &mut self,
+        delta: Duration,
+    ) -> Result<Timing<Rc<[u8]>>, Box<dyn Error + Send + Sync>> {
+        let delta = Duration::from_nanos((delta.as_nanos() % self.cycle_time().as_nanos()) as u64);
+        let now = Instant::now();
+
+        match &self.cache {
+            Some((valid_until, frame_time, frame)) if now <= *valid_until => Ok(Timing {
+                frame: frame.clone(),
+                frame_time: *frame_time,
+                time_left: *valid_until - now,
+            }),
+            _ => {
+                let timing = self.src.command_buffer(delta)?;
+                let Timing {
+                    frame,
+                    frame_time,
+                    time_left,
+                } = &timing;
+
+                self.cache = Some((Instant::now().add(*time_left), *frame_time, frame.clone()));
+
+                Ok(timing)
             }
         }
     }
@@ -124,6 +182,9 @@ impl<Src: CommandBufferSource> CommandBufferSource for OnDemandCache<Src> {
 pub enum SetupError {
     #[error("unable to submit sqe to submission queue: {:?}", 0)]
     SqeSubmission(#[from] PushError),
+
+    #[error("error: {:?}", 0)]
+    Any(#[from] Box<dyn Error + Send + Sync>),
 }
 
 #[derive(Debug, Error)]
@@ -139,6 +200,9 @@ pub enum ControlFlowError {
 
     #[error("io error: {:?}", 0)]
     Io(#[from] std::io::Error),
+
+    #[error("error: {:?}", 0)]
+    Any(#[from] Box<dyn Error + Send + Sync>),
 }
 
 rummelplatz::ring! {

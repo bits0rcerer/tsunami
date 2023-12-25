@@ -10,12 +10,38 @@ use os_socketaddr::OsSocketAddr;
 use rummelplatz::io_uring::opcode;
 use rummelplatz::io_uring::squeue::{Entry, Flags};
 use rummelplatz::io_uring::types::{Fd, Timespec};
-use rummelplatz::{ControlFlow, RingOperation, SubmissionQueueSubmitter};
+use rummelplatz::{io_uring, ControlFlow, RingOperation, SubmissionQueueSubmitter};
 use socket2::{Domain, Protocol, Socket, Type};
 use tracing::{debug, error, info, warn};
 
 use crate::breadth_flatten::BreadthFlatten;
 use crate::{CommandBufferSource, ControlFlowError, ControlFlowWarn, SetupError, TeardownError};
+
+pub struct DebugShield<T>(pub T);
+
+impl<T> Debug for DebugShield<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str("...")
+    }
+}
+
+impl<T> From<T> for DebugShield<T> {
+    fn from(value: T) -> Self {
+        Self(value)
+    }
+}
+
+impl<T> DebugShield<T> {
+    pub fn get(&self) -> &T {
+        &self.0
+    }
+    pub fn get_mut(&mut self) -> &mut T {
+        &mut self.0
+    }
+    pub fn take(self) -> T {
+        self.0
+    }
+}
 
 #[derive(Debug)]
 pub struct FlutOp {
@@ -28,7 +54,6 @@ pub struct FlutOp {
     connections: usize,
 
     time_anchor: Instant,
-    // TODO: determine the impact of dynamic dispatch performance penalty
     command_buffer_sources: Box<[Box<dyn CommandBufferSource>]>,
 }
 
@@ -60,20 +85,6 @@ impl FlutOp {
             time_anchor,
             command_buffer_sources,
         }
-    }
-}
-
-pub struct DebugShield<T>(T);
-
-impl<T> Debug for DebugShield<T> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_str("...")
-    }
-}
-
-impl<T> From<T> for DebugShield<T> {
-    fn from(value: T) -> Self {
-        Self(value)
     }
 }
 
@@ -142,7 +153,7 @@ impl RingOperation for FlutOp {
 
         for (i, c) in connections.into_iter().enumerate() {
             let buffer = self.command_buffer_sources[i % self.command_buffer_sources.len()]
-                .command_buffer(self.time_anchor.elapsed());
+                .command_buffer(self.time_anchor.elapsed())?;
             let socket_write = opcode::Write::new(
                 Fd(c.as_raw_fd()),
                 buffer.frame.as_ptr(),
@@ -260,8 +271,12 @@ impl RingOperation for FlutOp {
                 (n, Some((last_buffer, written)))
                     if written + n as usize == last_buffer.0.len() =>
                 {
-                    let buffer = self.command_buffer_sources[source_index]
-                        .command_buffer(self.time_anchor.elapsed());
+                    let buffer = match self.command_buffer_sources[source_index]
+                        .command_buffer(self.time_anchor.elapsed())
+                    {
+                        Ok(buffer) => buffer,
+                        Err(e) => return (ControlFlow::Error(ControlFlowError::Any(e)), None),
+                    };
                     let socket_write = opcode::Write::new(
                         Fd(socket.as_raw_fd()),
                         buffer.frame.as_ptr(),
@@ -371,8 +386,12 @@ impl RingOperation for FlutOp {
                 0 => {
                     info!("connection {connection_id} reconnected");
 
-                    let buffer = self.command_buffer_sources[source_index]
-                        .command_buffer(self.time_anchor.elapsed());
+                    let buffer = match self.command_buffer_sources[source_index]
+                        .command_buffer(self.time_anchor.elapsed())
+                    {
+                        Ok(buffer) => buffer,
+                        Err(e) => return (ControlFlow::Error(ControlFlowError::Any(e)), None),
+                    };
                     let socket_write = opcode::Write::new(
                         Fd(socket.as_raw_fd()),
                         buffer.frame.as_ptr(),
@@ -404,7 +423,7 @@ impl RingOperation for FlutOp {
 
     fn on_teardown_completion<W: Fn(&mut Entry, Self::RingData)>(
         &mut self,
-        _completion_entry: rummelplatz::io_uring::cqueue::Entry,
+        _completion_entry: io_uring::cqueue::Entry,
         ring_data: Self::RingData,
         _submitter: SubmissionQueueSubmitter<Self::RingData, W>,
     ) -> Result<(), Self::TeardownError> {

@@ -1,3 +1,5 @@
+use std::convert::Infallible;
+
 use rayon::prelude::*;
 
 use crate::draw_strategy::DrawStrategy;
@@ -29,8 +31,10 @@ impl RayonProcessor {
 }
 
 impl FrameProcessor for RayonProcessor {
-    fn process(&self, frame: &Frame) -> Box<[u8]> {
-        match frame {
+    type Error = Infallible;
+
+    fn process(&self, frame: &Frame) -> Result<Box<[u8]>, Self::Error> {
+        Ok(match frame {
             Frame::Rgba(buffer) => self
                 .draw_order
                 .into_par_iter()
@@ -72,6 +76,6 @@ impl FrameProcessor for RayonProcessor {
                 })
                 .flatten()
                 .collect(),
-        }
+        })
     }
 }

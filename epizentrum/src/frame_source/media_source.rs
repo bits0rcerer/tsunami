@@ -3,7 +3,7 @@ use std::path::Path;
 use std::ptr::slice_from_raw_parts_mut;
 use std::time::Duration;
 
-use image::{AnimationDecoder, Frame, Frames, ImageError, ImageFormat, ImageResult};
+use image::{AnimationDecoder, Delay, Frame, Frames, ImageError, ImageFormat, ImageResult};
 use rayon::iter::Either;
 use thiserror::Error;
 
@@ -27,7 +27,7 @@ pub enum MediaSourceError {
 #[derive(Debug)]
 pub struct MediaSource {
     size: (u16, u16),
-    frames: Box<[(crate::frame_source::Frame, Duration)]>,
+    frames: Box<[(frame_source::Frame, Duration)]>,
     time: Duration,
 }
 
@@ -51,7 +51,12 @@ impl MediaSource {
                 if png_decoder.is_apng() {
                     Either::Left(png_decoder.apng().into_frames())
                 } else {
-                    Either::Right(Frame::new(image::open(path)?.into_rgba8()))
+                    Either::Right(Frame::from_parts(
+                        image::open(path)?.into_rgba8(),
+                        0,
+                        0,
+                        Delay::from_numer_denom_ms(u32::MAX, 1),
+                    ))
                 }
             }
             ImageFormat::Gif => {
@@ -71,7 +76,12 @@ impl MediaSource {
             | ImageFormat::OpenExr
             | ImageFormat::Farbfeld
             | ImageFormat::Avif
-            | ImageFormat::Qoi => Either::Right(Frame::new(image::open(path)?.into_rgba8())),
+            | ImageFormat::Qoi => Either::Right(Frame::from_parts(
+                image::open(path)?.into_rgba8(),
+                0,
+                0,
+                Delay::from_numer_denom_ms(u32::MAX, 1),
+            )),
             format => return Err(MediaSourceError::UnsupportedFormat(format)),
         };
 
@@ -83,18 +93,13 @@ impl MediaSource {
         .map(|frame| {
             frame.map(|f| {
                 size = Some((f.buffer().width() as u16, f.buffer().height() as u16));
-
                 let delay = f.delay().into();
 
                 let buffer = f.into_buffer().into_raw().into_boxed_slice();
                 let len = buffer.len();
                 let ptr = Box::into_raw(buffer) as *mut [u8; 4];
-                (
-                    crate::frame_source::Frame::Rgba(unsafe {
-                        Box::from_raw(slice_from_raw_parts_mut(ptr, len / 4))
-                    }),
-                    delay,
-                )
+                let buffer = unsafe { Box::from_raw(slice_from_raw_parts_mut(ptr, len / 4)) };
+                (frame_source::Frame::Rgba(buffer), delay)
             })
         })
         .collect::<ImageResult<Vec<_>>>()?
