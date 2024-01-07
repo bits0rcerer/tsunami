@@ -33,4 +33,9 @@ RUSTFLAGS='-C target-cpu=native' cargo build --release --package tsunami
 ./target/release/tsunami help
 ```
 
-## 👋 See you at 37c3
+## Troubleshooting
+
+- `tsunami` uses the git version of `krnl`. So you need `krnlc` from git as well.
+    ```bash
+    cargo +nightly-2023-04-15 install --git https://github.com/charles-r-earp/krnl krnlc --no-default-features --features use-installed-tools
+    ```
